@@ -1,0 +1,12 @@
+tensorflow
+streamlit
+streamlit-folium
+folium
+requests
+pillow
+numpy
+matplotlib
+seaborn
+pandas
+opencv-python-headless
+scikit-learn
