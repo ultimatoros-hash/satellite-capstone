@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.models import Model
@@ -10,6 +11,7 @@ import umap
 from scipy import fftpack
 from lime import lime_image
 from skimage.segmentation import mark_boundaries
+from skimage.measure import shannon_entropy
 
 # --- CONFIG ---
 DATA_DIR = "data/raw/images"
@@ -30,13 +32,66 @@ def load_sample_data(num_samples=100):
         labels.extend(batch_lbl.numpy())
     return np.array(images[:num_samples]), np.array(labels[:num_samples]), class_names
 
+def calculate_vari(image):
+    """
+    Calcule le Visible Atmospherically Resistant Index (VARI).
+    Formule : (Green - Red) / (Green + Red - Blue)
+    """
+    # Normalisation 0-1
+    img_norm = image.astype('float32') / 255.0
+    R = img_norm[:,:,0]
+    G = img_norm[:,:,1]
+    B = img_norm[:,:,2]
+    
+    epsilon = 1e-6
+    vari = (G - R) / (G + R - B + epsilon)
+    return vari
+
+def run_physical_metrics_analysis(images, labels, class_names):
+    """Compare l'Entropie Spatiale et le VARI par classe"""
+    print("Running Biophysical Metrics Analysis (Entropy & VARI)...")
+    
+    metrics = {'entropy': [], 'vari_mean': [], 'label': []}
+    
+    for img, label in zip(images, labels):
+        # 1. Spatial Entropy (Texture Complexity)
+        # Convert to grayscale for entropy calculation
+        gray = tf.image.rgb_to_grayscale(img).numpy()
+        E = shannon_entropy(gray)
+        
+        # 2. VARI (Vegetation Health)
+        V = np.mean(calculate_vari(img))
+        
+        metrics['entropy'].append(E)
+        metrics['vari_mean'].append(V)
+        metrics['label'].append(class_names[label])
+        
+    # Visualisation
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Boxplot Entropie
+    sns.boxplot(x='label', y='entropy', data=metrics, ax=ax1, palette='magma')
+    ax1.set_title("Spatial Entropy (Texture Complexity)\n(Urban should be high, Desert/Water low)")
+    ax1.grid(True, alpha=0.3)
+    
+    # Boxplot VARI
+    sns.boxplot(x='label', y='vari_mean', data=metrics, ax=ax2, palette='Greens')
+    ax2.set_title("VARI Index (Vegetation Density)\n(Forest should be highest)")
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/physical_metrics.png")
+    print("✅ Biophysical Plots Saved.")
+
 def run_fft_analysis(images, class_names, labels):
     """Performs Fourier Transform Analysis"""
     print("Running FFT (Frequency Domain) Analysis...")
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     
-    # Get one image per class
     unique_classes = np.unique(labels)
+    # Limiter aux 4 premières classes s'il y en a plus
+    unique_classes = unique_classes[:4] 
+
     for i, cls_idx in enumerate(unique_classes):
         # Find first image of this class
         idx = np.where(labels == cls_idx)[0][0]
@@ -44,9 +99,7 @@ def run_fft_analysis(images, class_names, labels):
         
         # Perform 2D FFT
         fft2 = fftpack.fft2(img)
-        # Shift zero frequency to center
         fft2_shifted = fftpack.fftshift(fft2)
-        # Calculate Magnitude Spectrum (Log scale)
         magnitude_spectrum = 20 * np.log(np.abs(fft2_shifted))
         
         ax = axes[i]
@@ -62,7 +115,7 @@ def run_manifold_learning(images, labels, class_names):
     """Runs PCA and UMAP comparison"""
     print("Running Manifold Learning (PCA vs UMAP)...")
     
-    # Flatten images for Scikit-Learn (N, 128*128*3)
+    # Flatten images for Scikit-Learn
     flat_images = images.reshape(images.shape[0], -1) / 255.0
     
     # 1. PCA
@@ -89,23 +142,25 @@ def run_manifold_learning(images, labels, class_names):
 def visualize_cnn_filters(model_path):
     """Visualizes the first layer kernels"""
     print("Visualizing CNN Filters...")
-    model = tf.keras.models.load_model(model_path)
-    
+    try:
+        model = tf.keras.models.load_model(model_path)
+    except:
+        print("Model not found for filter viz.")
+        return
+
     # Find first Conv2D layer
     for layer in model.layers:
         if 'conv' in layer.name:
             filters, biases = layer.get_weights()
-            # Normalize to 0-1 for plotting
             f_min, f_max = filters.min(), filters.max()
             filters = (filters - f_min) / (f_max - f_min)
             
-            # Plot first 16 filters
-            n_filters = 16
+            n_filters = min(16, filters.shape[3])
             fig, axes = plt.subplots(2, 8, figsize=(20, 5))
             for i in range(n_filters):
                 f = filters[:, :, :, i]
                 ax = axes[i//8, i%8]
-                ax.imshow(f) # Plot RGB filter
+                ax.imshow(f)
                 ax.axis('off')
             plt.suptitle(f"Layer {layer.name} Filter Visualization")
             plt.savefig(f"{PLOT_DIR}/cnn_filters.png")
@@ -113,13 +168,22 @@ def visualize_cnn_filters(model_path):
             return
 
 def run_lime_explanation(model_path, images, labels, class_names):
-    """Runs LIME (Local Interpretable Model-agnostic Explanations)"""
+    """Runs LIME explanation"""
     print("Running LIME Explanation...")
-    model = tf.keras.models.load_model(model_path)
+    try:
+        model = tf.keras.models.load_model(model_path)
+    except:
+        return
+
     explainer = lime_image.LimeImageExplainer()
     
-    # Pick a random Urban image
-    idx = np.where(labels == class_names.index('urban'))[0][0]
+    # Try to find an 'urban' image, else take the first one
+    try:
+        target_idx = class_names.index('urban')
+        idx = np.where(labels == target_idx)[0][0]
+    except:
+        idx = 0
+
     img = images[idx].astype('double')
     
     explanation = explainer.explain_instance(
@@ -132,7 +196,7 @@ def run_lime_explanation(model_path, images, labels, class_names):
     
     plt.figure(figsize=(8, 8))
     plt.imshow(mark_boundaries(temp / 255.0, mask))
-    plt.title("LIME Explanation (Superpixels)")
+    plt.title(f"LIME Explanation for {class_names[labels[idx]]}")
     plt.axis('off')
     plt.savefig(f"{PLOT_DIR}/lime_explanation.png")
     print("✅ LIME Plot Saved.")
@@ -140,9 +204,11 @@ def run_lime_explanation(model_path, images, labels, class_names):
 if __name__ == "__main__":
     if not os.path.exists(PLOT_DIR): os.makedirs(PLOT_DIR)
     
+    # Load 200 samples
     imgs, lbls, names = load_sample_data(200)
     
-    # 1. Physics Analysis
+    # 1. Physics Analysis (NEW)
+    run_physical_metrics_analysis(imgs, lbls, names)
     run_fft_analysis(imgs, names, lbls)
     
     # 2. Statistical Analysis
@@ -152,5 +218,3 @@ if __name__ == "__main__":
     if os.path.exists(MODEL_PATH):
         visualize_cnn_filters(MODEL_PATH)
         run_lime_explanation(MODEL_PATH, imgs, lbls, names)
-    else:
-        print("Skipping Model Analysis (Model not found)")
