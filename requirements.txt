@@ -10,3 +10,7 @@ seaborn
 pandas
 opencv-python-headless
 scikit-learn
+codecarbon
+umap-learn
+lime
+scikit-image
